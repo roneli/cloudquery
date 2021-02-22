@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/cloudquery/cloudquery/database"
 	"github.com/cloudquery/cloudquery/plugin"
@@ -73,20 +72,12 @@ func (c *Client) Run(path string) error {
 	for _, provider := range config.Providers {
 
 		if provider.Name == "" {
-			log.Error().Msg("provider must contain key 'name' in configuration")
-			return errors.New("provider must contain key 'name' in configuration")
-		}
-		version := provider.Version
-		if provider.Version == "" {
-			version = "latest"
-		}
-
-		log.Debug().Str("provider", provider.Name).Str("version", version).Msg("getting or creating provider")
-		cqProvider, err := manager.GetOrCreateProvider(provider.Name, version)
-		if err != nil {
-			log.Error().Err(err).Str("provider", provider.Name).Str("version", version).Msg("failed to create provider plugin")
+			log.Error().Msg("provider must contain key 'name' in configuration, skipping...")
 			continue
 		}
+
+		log.Debug().Str("provider", provider.Name).Str("version", provider.Version).Msg("getting or creating provider")
+		cqProvider, err := manager.GetOrCreateProvider(provider.Name, provider.Version)
 		// create intermediate variable
 		provider := provider
 		errGroup.Go(func() error {

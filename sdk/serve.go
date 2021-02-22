@@ -41,14 +41,13 @@ func ServePlugin(opts ServeOpts) {
 	// CloudQuery main command line accepting any args same as the main binary. The client will execute the
 	// only this plugin instead of using the downloaded provider plugins
 	if os.Getenv("CQ_PROVIDER_DEBUG") != "" {
-		plugin.GetManager().AddEmbeddedPlugin(opts.Name, opts.Provider)
+		plugin.GetManager().SetProvider(opts.Name, opts.Provider)
 		cmd.Execute()
-		return
 	}
 
 	if !opts.NoLogOutputOverride {
 		// In order to allow go-plugin to correctly pass log-levels through to
-		// cloudquery, we need to use an hclog.Logger with JSON output. We can
+		// terraform, we need to use an hclog.Logger with JSON output. We can
 		// inject this into the std `log` package here, so existing providers will
 		// make use of it automatically.
 		logger := hclog.New(&hclog.LoggerOptions{

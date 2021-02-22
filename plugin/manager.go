@@ -2,6 +2,11 @@ package plugin
 
 import (
 	"fmt"
+	"github.com/cloudquery/cloudquery/logging"
+	"github.com/hashicorp/go-plugin"
+	"github.com/rs/zerolog/log"
+	"os"
+	"os/exec"
 	"sync"
 )
 
@@ -11,63 +16,113 @@ var (
 )
 
 type Manager struct {
-	clients map[string]ManagedPlugin
+	activeClients map[string]*plugin.Client
+	registry      map[string]CQProvider
+
+	lock sync.RWMutex
+}
+
+func (p *Manager) Setup() error {
+	return nil
 }
 
 func (p *Manager) Shutdown() {
-	for _, c := range p.clients {
-		c.Close()
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	for n, c := range p.activeClients {
+		c.Kill()
+		delete(p.activeClients, n)
 	}
-	// create fresh map
-	p.clients = make(map[string]ManagedPlugin)
+	p.registry = make(map[string]CQProvider)
 }
 
+
 func (p *Manager) GetProvider(providerName, version string) (CQProvider, error) {
-	cq, ok := p.clients[providerName]
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+	cq, ok := p.registry[providerName]
 	if !ok {
 		return nil, fmt.Errorf("plugin %s@%s does not exist", providerName, version)
 	}
-	return cq.Provider(), nil
+	return cq, nil
 }
 
-func (p *Manager) AddEmbeddedPlugin(providerName string, cqp CQProvider) {
-	p.clients[providerName] = NewEmbeddedPlugin(providerName, "latest", cqp)
+func (p *Manager) SetProvider(providerName string, cqp CQProvider) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	p.registry[providerName] = cqp
 }
 
 func (p *Manager) KillProvider(providerName string) error {
+	p.lock.Lock()
+	defer p.lock.Unlock()
 
-	client, ok := p.clients[providerName]
+	client, ok := p.activeClients[providerName]
 	if !ok {
 		return fmt.Errorf("client for provider %s does not exist", providerName)
 	}
-	client.Close()
-	delete(p.clients, providerName)
+	client.Kill()
+	delete(p.activeClients, providerName)
 	return nil
 }
 
 func (p *Manager) GetOrCreateProvider(providerName, version string) (CQProvider, error) {
+
 	provider, err := p.GetProvider(providerName, version)
-	if provider != nil || err == nil {
+	if provider != nil {
 		return provider, err
 	}
-	// Create RPC client and initialize CQProvider
-	return p.createProvider(providerName, version)
-}
 
-func (p *Manager) createProvider(providerName, version string) (CQProvider, error) {
-	mPlugin, err := NewRemotePlugin(providerName, version)
+	p.lock.Lock()
+	version = ""
+	if version == "" {
+		version = "latest"
+	}
+	pluginPath, _ := getProviderPath(providerName, version)
+
+	client := plugin.NewClient(&plugin.ClientConfig{
+		HandshakeConfig: Handshake,
+		VersionedPlugins: map[int]plugin.PluginSet{
+			1: PluginMap,
+		},
+		Cmd:              exec.Command(pluginPath),
+		AllowedProtocols: []plugin.Protocol{plugin.ProtocolGRPC},
+		SyncStderr:       os.Stderr,
+		SyncStdout:       os.Stdout,
+		Logger: logging.NewZHcLog(&log.Logger, ""),
+	})
+	rpcClient, err := client.Client()
 	if err != nil {
+		client.Kill()
 		return nil, err
 	}
-	p.clients[providerName] = mPlugin
-	return mPlugin.Provider(), nil
+	raw, err := rpcClient.Dispense("provider")
+	if err != nil {
+		client.Kill()
+		return nil, err
+	}
+
+	provider, ok := raw.(CQProvider)
+	if !ok {
+		client.Kill()
+		return nil, fmt.Errorf("failed to cast plugin")
+	}
+
+	p.activeClients[providerName] = client
+	p.lock.Unlock()
+	p.SetProvider(providerName, provider)
+	return provider, nil
 }
 
+
 func GetManager() *Manager {
+
 	doOnce.Do(
 		func() {
 			instance = &Manager{
-				clients: make(map[string]ManagedPlugin),
+				activeClients: make(map[string]*plugin.Client),
+				registry:      make(map[string]CQProvider),
+				lock:          sync.RWMutex{},
 			}
 		})
 	return instance
